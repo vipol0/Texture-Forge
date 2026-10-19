@@ -1,0 +1,5 @@
+# Make the MinGW (GNU) Windows build self-contained by statically linking the CRT.
+# The MSVC target (x86_64-pc-windows-msvc, via `cargo xwin`) already links the CRT
+# statically by default, so no configuration is needed for it.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]

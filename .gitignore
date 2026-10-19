@@ -1,0 +1,22 @@
+/target
+
+# ОС
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.idea/
+.vscode/
+.zed/
+
+*.log
+*.tmp
+*.swp
+*~
+*.rs.bk
+
+*.profraw
+perf.data*
+
+.env
+.env.*
