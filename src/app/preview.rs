@@ -218,7 +218,7 @@ fn crop_cursor(handle: CropHandle) -> egui::CursorIcon {
 }
 
 /// Paint a checkerboard behind the preview image so transparency is visible.
-fn paint_checkerboard(painter: &egui::Painter, rect: egui::Rect, dark_mode: bool) {
+pub(super) fn paint_checkerboard(painter: &egui::Painter, rect: egui::Rect, dark_mode: bool) {
     const CELL: f32 = 16.0;
     let visible = rect.intersect(painter.clip_rect());
     if visible.width() <= 0.0 || visible.height() <= 0.0 {

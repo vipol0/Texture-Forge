@@ -9,6 +9,7 @@ use eframe::egui;
 impl eframe::App for TextureForge {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_renderer(ctx);
+        self.poll_model_load(ctx);
         self.handle_dropped_files(ctx);
 
         // Keep the spinner in the status bar animating while a render is in progress, and the
@@ -51,6 +52,10 @@ impl eframe::App for TextureForge {
                 }
                 if ui.button("Пакетная обработка…").clicked() {
                     self.show_batch = true;
+                }
+                if ui.button("3D-предпросмотр…").clicked() {
+                    self.show_model_preview = true;
+                    self.model_preview.mark_dirty();
                 }
                 ui.separator();
                 if ui
@@ -172,6 +177,7 @@ impl eframe::App for TextureForge {
         });
 
         self.show_batch_window(ctx);
+        self.show_model_window(ctx);
 
         // Show an overlay while files are dragged over the window.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {

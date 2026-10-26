@@ -1,8 +1,10 @@
 mod batch_state;
+mod model_preview;
 mod preview;
 mod ui;
 
 use self::batch_state::BatchState;
+use self::model_preview::ModelPreview;
 use self::preview::{CropDrag, PreviewView};
 use crate::files::{collect_images_in_dir, export_file_name, IMAGE_EXTENSIONS};
 use crate::model::export::OutputFormat;
@@ -54,6 +56,9 @@ pub(crate) struct TextureForge {
     /// Batch-processing window and its state.
     show_batch: bool,
     batch: BatchState,
+    /// Floating 3D texture preview window and its state.
+    show_model_preview: bool,
+    model_preview: ModelPreview,
     status: String,
     /// Fraction of the preview width occupied by the left (original) pane.
     split_fraction: f32,
@@ -90,6 +95,8 @@ impl TextureForge {
             crop_drag: None,
             show_batch: false,
             batch: BatchState::default(),
+            show_model_preview: false,
+            model_preview: ModelPreview::default(),
             status: "Откройте изображение, чтобы начать.".into(),
             split_fraction: 0.5,
             view_original: PreviewView::default(),
@@ -150,6 +157,7 @@ impl TextureForge {
                 egui::TextureOptions::LINEAR,
             )
         });
+        self.model_preview.mark_dirty();
         self.status = "Изображение загружено.".into();
         self.refresh_previews(ctx);
     }
@@ -225,10 +233,12 @@ impl TextureForge {
                                 egui::TextureOptions::NEAREST,
                             ));
                             self.result_image = Some(img);
+                            self.model_preview.mark_dirty();
                             self.request_reencode_size();
                         } else {
                             self.result_image = None;
                             self.result_size = None;
+                            self.model_preview.mark_dirty();
                         }
                     }
                     if let Some(size) = size {

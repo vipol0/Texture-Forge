@@ -5,6 +5,7 @@ mod blue_noise;
 mod files;
 mod imaging;
 mod model;
+mod preview3d;
 mod render;
 #[cfg(test)]
 mod test_support;
