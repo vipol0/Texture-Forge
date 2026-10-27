@@ -6,7 +6,7 @@ description = "A lightweight texture stylizer with before/after preview"
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
-gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "KHR_texture_transform"] }
 quantette = "0.6"
 rayon = "1"
 rfd = "0.15"

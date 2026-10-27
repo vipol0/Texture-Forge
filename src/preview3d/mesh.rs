@@ -22,6 +22,9 @@ impl BuiltinShape {
 
 /// A triangle mesh with per-vertex texture coordinates.
 ///
+/// UVs use the same top-left origin as `image::RgbaImage` (V grows downwards). Importers must
+/// convert from the source format's convention before storing coordinates here.
+///
 /// Normals are intentionally not stored: the rasterizer computes flat face normals, which is
 /// robust for imported models that may have missing or inconsistent normal data.
 #[derive(Clone, Debug, Default)]
@@ -29,6 +32,8 @@ pub(crate) struct Mesh3d {
     pub(crate) positions: Vec<[f32; 3]>,
     pub(crate) uvs: Vec<[f32; 2]>,
     pub(crate) indices: Vec<[u32; 3]>,
+    /// True when at least part of the mesh had no UV data and a projection was generated.
+    pub(crate) uvs_generated: bool,
 }
 
 impl Mesh3d {
@@ -93,6 +98,7 @@ impl Mesh3d {
             positions: Vec::with_capacity((segments + 1) * (rings + 1)),
             uvs: Vec::with_capacity((segments + 1) * (rings + 1)),
             indices: Vec::with_capacity(segments * rings * 2),
+            uvs_generated: false,
         };
 
         for i in 0..=rings {
@@ -133,6 +139,7 @@ impl Mesh3d {
             ],
             uvs: vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
             indices: vec![[0, 1, 2], [0, 2, 3]],
+            uvs_generated: false,
         }
     }
 
@@ -172,24 +179,56 @@ impl Mesh3d {
         }
     }
 
+    /// Generate a fallback spherical projection for the given vertices.
+    pub(crate) fn spherical_uvs(positions: &[[f32; 3]]) -> Vec<[f32; 2]> {
+        let center = Self::bounds_center(positions);
+        positions
+            .iter()
+            .map(|&position| Self::spherical_uv(position, center))
+            .collect()
+    }
+
+    /// Center of the axis-aligned bounds, used as the origin for the fallback projection.
+    pub(crate) fn bounds_center(positions: &[[f32; 3]]) -> [f32; 3] {
+        if positions.is_empty() {
+            return [0.0; 3];
+        }
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for p in positions {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(p[axis]);
+                max[axis] = max[axis].max(p[axis]);
+            }
+        }
+        [
+            (min[0] + max[0]) * 0.5,
+            (min[1] + max[1]) * 0.5,
+            (min[2] + max[2]) * 0.5,
+        ]
+    }
+
+    /// Spherical UV for one point, with `center` as the projection origin.
+    pub(crate) fn spherical_uv(position: [f32; 3], center: [f32; 3]) -> [f32; 2] {
+        let x = position[0] - center[0];
+        let y = position[1] - center[1];
+        let z = position[2] - center[2];
+        let radius = (x * x + y * y + z * z).sqrt();
+        if radius <= 1e-6 {
+            return [0.5, 0.5];
+        }
+        let u = z.atan2(x) / (2.0 * PI) + 0.5;
+        let v = 0.5 - (y / radius).asin() / PI;
+        [u, v]
+    }
+
     /// Fill in spherical UVs for models that do not ship texture coordinates.
     pub(crate) fn ensure_uvs(&mut self) {
         if self.uvs.len() == self.positions.len() {
             return;
         }
-        self.uvs.clear();
-        self.uvs.reserve(self.positions.len());
-        for p in &self.positions {
-            let [x, y, z] = *p;
-            let radius = (x * x + y * y + z * z).sqrt();
-            if radius <= 1e-6 {
-                self.uvs.push([0.5, 0.5]);
-                continue;
-            }
-            let u = z.atan2(x) / (2.0 * PI) + 0.5;
-            let v = 0.5 - (y / radius).asin() / PI;
-            self.uvs.push([u, v]);
-        }
+        self.uvs = Self::spherical_uvs(&self.positions);
+        self.uvs_generated = true;
     }
 }
 

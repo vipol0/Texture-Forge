@@ -43,31 +43,33 @@ fn load_obj(path: &Path) -> Result<Mesh3d, String> {
         tobj::load_obj(path, &options).map_err(|e| format!("Не удалось прочитать OBJ: {e}"))?;
 
     let mut mesh = Mesh3d::default();
-    let mut has_uvs = true;
     for model in models {
         let source = model.mesh;
         let base = mesh.positions.len() as u32;
         let vertex_count = source.positions.len() / 3;
-        mesh.positions.extend(
-            source
-                .positions
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|p| [p[0], p[1], p[2]]),
-        );
+        let positions: Vec<[f32; 3]> = source
+            .positions
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
+        mesh.positions.extend_from_slice(&positions);
 
         if source.texcoords.len() == vertex_count * 2 {
+            // OBJ texture coordinates have a bottom-left origin, while the preview samples
+            // images from the top-left, so flip V on import.
             mesh.uvs.extend(
                 source
                     .texcoords
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|uv| [uv[0], uv[1]]),
+                    .map(|uv| [uv[0], 1.0 - uv[1]]),
             );
         } else {
-            has_uvs = false;
+            mesh.uvs.extend(Mesh3d::spherical_uvs(&positions));
+            mesh.uvs_generated = true;
         }
 
         mesh.indices.extend(
@@ -80,9 +82,6 @@ fn load_obj(path: &Path) -> Result<Mesh3d, String> {
         );
     }
 
-    if !has_uvs {
-        mesh.uvs.clear();
-    }
     Ok(mesh)
 }
 
@@ -108,7 +107,6 @@ fn load_gltf(path: &Path) -> Result<Mesh3d, String> {
         .map_err(|e| format!("Не удалось прочитать буферы glTF: {e}"))?;
 
     let mut mesh = Mesh3d::default();
-    let mut has_uvs = true;
     let identity = identity_matrix();
 
     if let Some(scene) = gltf
@@ -117,17 +115,14 @@ fn load_gltf(path: &Path) -> Result<Mesh3d, String> {
         .or_else(|| gltf.document.scenes().next())
     {
         for node in scene.nodes() {
-            walk_node(&node, identity, &buffers, &mut mesh, &mut has_uvs);
+            walk_node(&node, identity, &buffers, &mut mesh);
         }
     } else {
         for node in gltf.document.nodes() {
-            walk_node(&node, identity, &buffers, &mut mesh, &mut has_uvs);
+            walk_node(&node, identity, &buffers, &mut mesh);
         }
     }
 
-    if !has_uvs {
-        mesh.uvs.clear();
-    }
     Ok(mesh)
 }
 
@@ -136,16 +131,73 @@ fn walk_node(
     parent: [[f32; 4]; 4],
     buffers: &[gltf::buffer::Data],
     mesh: &mut Mesh3d,
-    has_uvs: &mut bool,
 ) {
     let world = multiply(parent, node.transform().matrix());
     if let Some(source) = node.mesh() {
         for primitive in source.primitives() {
-            append_primitive(&primitive, world, buffers, mesh, has_uvs);
+            append_primitive(&primitive, world, buffers, mesh);
         }
     }
     for child in node.children() {
-        walk_node(&child, world, buffers, mesh, has_uvs);
+        walk_node(&child, world, buffers, mesh);
+    }
+}
+
+/// Material UV settings that affect how the previewed texture should be sampled.
+#[derive(Clone, Copy, Debug)]
+struct UvLayout {
+    tex_coord: u32,
+    offset: [f32; 2],
+    rotation: f32,
+    scale: [f32; 2],
+}
+
+impl Default for UvLayout {
+    fn default() -> Self {
+        Self {
+            tex_coord: 0,
+            offset: [0.0, 0.0],
+            rotation: 0.0,
+            scale: [1.0, 1.0],
+        }
+    }
+}
+
+impl UvLayout {
+    fn apply(self, uv: [f32; 2]) -> [f32; 2] {
+        let (sin, cos) = self.rotation.sin_cos();
+        let x = uv[0] * self.scale[0];
+        let y = uv[1] * self.scale[1];
+        [
+            cos * x + sin * y + self.offset[0],
+            -sin * x + cos * y + self.offset[1],
+        ]
+    }
+}
+
+fn primitive_uv_layout(primitive: &gltf::Primitive<'_>) -> UvLayout {
+    let info = primitive
+        .material()
+        .pbr_metallic_roughness()
+        .base_color_texture();
+    let Some(info) = info else {
+        return UvLayout::default();
+    };
+
+    let transform = info.texture_transform();
+    let tex_coord = transform
+        .as_ref()
+        .and_then(|transform| transform.tex_coord())
+        .unwrap_or_else(|| info.tex_coord());
+    let (offset, rotation, scale) = match transform {
+        Some(transform) => (transform.offset(), transform.rotation(), transform.scale()),
+        None => ([0.0, 0.0], 0.0, [1.0, 1.0]),
+    };
+    UvLayout {
+        tex_coord,
+        offset,
+        rotation,
+        scale,
     }
 }
 
@@ -154,8 +206,8 @@ fn append_primitive(
     transform: [[f32; 4]; 4],
     buffers: &[gltf::buffer::Data],
     mesh: &mut Mesh3d,
-    has_uvs: &mut bool,
 ) {
+    let uv_layout = primitive_uv_layout(primitive);
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
     let Some(positions) = reader.read_positions() else {
         return;
@@ -166,8 +218,18 @@ fn append_primitive(
     }
 
     let uvs: Option<Vec<[f32; 2]>> = reader
-        .read_tex_coords(0)
-        .map(|tex_coords| tex_coords.into_f32().collect());
+        .read_tex_coords(uv_layout.tex_coord)
+        .or_else(|| {
+            (uv_layout.tex_coord != 0)
+                .then(|| reader.read_tex_coords(0))
+                .flatten()
+        })
+        .map(|tex_coords| {
+            tex_coords
+                .into_f32()
+                .map(|uv| uv_layout.apply(uv))
+                .collect()
+        });
 
     let base = mesh.positions.len() as u32;
     let source_indices: Vec<u32> = match reader.read_indices() {
@@ -184,7 +246,11 @@ fn append_primitive(
     mesh.positions.extend(positions);
     match uvs {
         Some(uvs) if uvs.len() == vertex_count => mesh.uvs.extend(uvs),
-        _ => *has_uvs = false,
+        _ => {
+            mesh.uvs
+                .extend(Mesh3d::spherical_uvs(&mesh.positions[base as usize..]));
+            mesh.uvs_generated = true;
+        }
     }
 
     mesh.indices.extend(
@@ -231,7 +297,6 @@ fn load_fbx(path: &Path) -> Result<Mesh3d, String> {
         .map_err(|e| format!("Не удалось разобрать FBX: {e:?}"))?;
 
     let mut mesh = Mesh3d::default();
-    let mut has_uvs = true;
     for node in &scene.nodes {
         if !node.visible || node.is_geometry_transform_helper || node.is_scale_helper {
             continue;
@@ -239,18 +304,17 @@ fn load_fbx(path: &Path) -> Result<Mesh3d, String> {
         let Some(source) = node.mesh.as_ref() else {
             continue;
         };
-        append_fbx_mesh(node, source, &mut mesh, &mut has_uvs);
+        append_fbx_mesh(node, source, &mut mesh);
     }
 
-    if !has_uvs {
-        mesh.uvs.clear();
-    }
     Ok(mesh)
 }
 
-fn append_fbx_mesh(node: &ufbx::Node, source: &ufbx::Mesh, mesh: &mut Mesh3d, has_uvs: &mut bool) {
+fn append_fbx_mesh(node: &ufbx::Node, source: &ufbx::Mesh, mesh: &mut Mesh3d) {
+    let first_vertex = mesh.positions.len();
     let mut corner_map = vec![None; source.num_indices];
     let mut triangle_indices = Vec::new();
+    let mut missing_uv = Vec::new();
 
     for face in source.faces.iter().copied() {
         if face.num_indices < 3 {
@@ -267,7 +331,7 @@ fn append_fbx_mesh(node: &ufbx::Node, source: &ufbx::Mesh, mesh: &mut Mesh3d, ha
                     source,
                     corner,
                     mesh,
-                    has_uvs,
+                    &mut missing_uv,
                     &mut corner_map,
                 )
             }) else {
@@ -276,6 +340,15 @@ fn append_fbx_mesh(node: &ufbx::Node, source: &ufbx::Mesh, mesh: &mut Mesh3d, ha
             mesh.indices.push([a, b, c]);
         }
     }
+
+    if !missing_uv.is_empty() {
+        let center = Mesh3d::bounds_center(&mesh.positions[first_vertex..]);
+        for index in missing_uv {
+            let position = mesh.positions[index as usize];
+            mesh.uvs[index as usize] = Mesh3d::spherical_uv(position, center);
+        }
+        mesh.uvs_generated = true;
+    }
 }
 
 fn fbx_corner_vertex(
@@ -283,7 +356,7 @@ fn fbx_corner_vertex(
     source: &ufbx::Mesh,
     corner: u32,
     mesh: &mut Mesh3d,
-    has_uvs: &mut bool,
+    missing_uv: &mut Vec<u32>,
     corner_map: &mut [Option<u32>],
 ) -> Option<u32> {
     let corner = corner as usize;
@@ -298,9 +371,10 @@ fn fbx_corner_vertex(
     mesh.positions
         .push([position.x as f32, position.y as f32, position.z as f32]);
     match uv {
-        Some(uv) => mesh.uvs.push([uv.x as f32, uv.y as f32]),
+        // FBX UVs have a bottom-left origin; convert them to the preview's top-left space.
+        Some(uv) => mesh.uvs.push([uv.x as f32, 1.0 - uv.y as f32]),
         None => {
-            *has_uvs = false;
+            missing_uv.push(index);
             mesh.uvs.push([0.0, 0.0]);
         }
     }
@@ -385,12 +459,51 @@ f 1/1 3/3 4/4
         assert_eq!(mesh.triangle_count(), 2);
         assert!(mesh.is_valid());
         assert_eq!(mesh.uvs.len(), mesh.positions.len());
+        assert!(!mesh.uvs_generated);
+        assert_eq!(
+            mesh.uvs,
+            vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]
+        );
         let radius = mesh
             .positions
             .iter()
             .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
             .fold(0.0_f32, f32::max);
         assert!((radius - 1.0).abs() < 1e-4);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn obj_keeps_uvs_from_textured_parts_and_fills_missing_ones() {
+        let dir = temp_dir("model_obj_mixed_uv");
+        let path = dir.join("mixed.obj");
+        std::fs::write(
+            &path,
+            "\
+v -1 -1 0
+v 1 -1 0
+v 1 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+o Textured
+f 1/1 2/2 3/3
+o Untextured
+v 3 -1 0
+v 5 -1 0
+v 5 1 0
+f 4 5 6
+",
+        )
+        .unwrap();
+
+        let mesh = load_model(&path).expect("mixed obj should load");
+        assert_eq!(mesh.positions.len(), 6);
+        assert_eq!(mesh.uvs.len(), mesh.positions.len());
+        assert!(mesh.uvs_generated);
+        assert_eq!(&mesh.uvs[..3], &[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        assert!(mesh.uvs[3..].iter().any(|uv| *uv != [0.0, 0.0]));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -444,6 +557,52 @@ f 1/1 3/3 4/4
     }
 
     #[test]
+    fn gltf_uses_material_texture_coordinate_set() {
+        let dir = temp_dir("model_glb_uv_set");
+        let path = dir.join("uv_set.glb");
+        let mut bin = Vec::new();
+        for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for component in position {
+                bin.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let uv0 = [[0.1_f32, 0.1], [0.2, 0.2], [0.3, 0.3]];
+        let uv1 = [[0.6_f32, 0.7], [0.8, 0.9], [0.4, 0.5]];
+        for uv in uv0.into_iter().chain(uv1) {
+            for component in uv {
+                bin.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1,"TEXCOORD_1":2},"material":0}]}],"materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0,"texCoord":1}}}],"textures":[{"source":0}],"images":[{"uri":"dummy.png"}],"buffers":[{"byteLength":84}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":24},{"buffer":0,"byteOffset":60,"byteLength":24}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"},{"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}]}"#;
+        let mut json_bytes = json.as_bytes().to_vec();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+
+        let total_len = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total_len);
+        glb.extend_from_slice(&0x4654_6C67_u32.to_le_bytes());
+        glb.extend_from_slice(&2_u32.to_le_bytes());
+        glb.extend_from_slice(&(total_len as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F_534A_u32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E_4942_u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        std::fs::write(&path, glb).unwrap();
+
+        let mesh = load_model(&path).expect("glb should load");
+        assert_eq!(mesh.uvs, uv1.to_vec());
+        assert!(!mesh.uvs_generated);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn loads_ascii_fbx_quad() {
         let dir = temp_dir("model_fbx");
         let path = dir.join("quad.fbx");
@@ -481,7 +640,7 @@ Objects:  {
             MappingInformationType: "ByPolygonVertex"
             ReferenceInformationType: "IndexToDirect"
             UV: *8 {
-                a: 0,0, 1,0, 1,1, 0,1
+                a: 0,0.1, 1,0.2, 1,0.3, 0,0.4
             }
             UVIndex: *4 {
                 a: 0,1,2,3
@@ -520,8 +679,23 @@ Connections:  {
             .iter()
             .flatten()
             .all(|&uv| (0.0..=1.0).contains(&uv)));
+        assert!(mesh.uvs.iter().all(|uv| uv[1] >= 0.6));
+        assert!(!mesh.uvs_generated);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn uv_layout_applies_scale_and_rotation() {
+        let layout = UvLayout {
+            tex_coord: 0,
+            offset: [0.1, 0.2],
+            rotation: std::f32::consts::FRAC_PI_2,
+            scale: [2.0, 3.0],
+        };
+        let uv = layout.apply([1.0, 0.0]);
+        assert!((uv[0] - 0.1).abs() < 1e-5);
+        assert!((uv[1] + 1.8).abs() < 1e-5);
     }
 
     #[test]

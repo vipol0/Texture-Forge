@@ -96,7 +96,7 @@ impl TextureForge {
             show_batch: false,
             batch: BatchState::default(),
             show_model_preview: false,
-            model_preview: ModelPreview::default(),
+            model_preview: ModelPreview::new(ctx.clone()),
             status: "Откройте изображение, чтобы начать.".into(),
             split_fraction: 0.5,
             view_original: PreviewView::default(),
@@ -158,6 +158,7 @@ impl TextureForge {
             )
         });
         self.model_preview.mark_dirty();
+        self.model_preview.reset_history();
         self.status = "Изображение загружено.".into();
         self.refresh_previews(ctx);
     }
@@ -169,9 +170,19 @@ impl TextureForge {
             return;
         };
         if let Some(bytes) = file.bytes.as_ref() {
-            self.load_image_bytes(&file.name, bytes, ctx);
+            if is_model_name(&file.name) {
+                self.status =
+                    "Модель из веб-перетаскивания не поддерживается. Перетащите файл из файловой системы.".into();
+            } else {
+                self.load_image_bytes(&file.name, bytes, ctx);
+            }
         } else if let Some(path) = file.path.as_ref() {
-            self.load_image(path, ctx);
+            if is_model_path(path) {
+                self.show_model_preview = true;
+                self.start_model_load_from(path.clone());
+            } else {
+                self.load_image(path, ctx);
+            }
         }
     }
 
@@ -463,6 +474,25 @@ impl TextureForge {
     }
 }
 
+fn is_model_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_model_extension)
+}
+
+fn is_model_name(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(is_model_extension)
+}
+
+fn is_model_extension(extension: &str) -> bool {
+    ["obj", "glb", "gltf", "fbx"]
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+}
+
 impl Default for TextureForge {
     fn default() -> Self {
         Self::new(&egui::Context::default())
@@ -551,6 +581,15 @@ mod tests {
         let actual = app.result_image.as_ref().unwrap().to_rgba8();
         assert_eq!(actual.dimensions(), expected.dimensions());
         assert_eq!(actual.as_raw(), expected.as_raw());
+    }
+
+    #[test]
+    fn model_path_detection_is_case_insensitive() {
+        assert!(is_model_path(std::path::Path::new("model.OBJ")));
+        assert!(is_model_path(std::path::Path::new("model.glb")));
+        assert!(is_model_name("model.fbx"));
+        assert!(!is_model_path(std::path::Path::new("texture.png")));
+        assert!(!is_model_name("README"));
     }
 
     fn wait_for_result(app: &mut TextureForge, ctx: &egui::Context) -> bool {

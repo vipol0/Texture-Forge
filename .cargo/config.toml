@@ -1,5 +1,12 @@
-# Make the MinGW (GNU) Windows build self-contained by statically linking the CRT.
-# The MSVC target (x86_64-pc-windows-msvc, via `cargo xwin`) already links the CRT
-# statically by default, so no configuration is needed for it.
+# Build self-contained Windows executables: link the C runtime statically.
+# This also makes `cc` compile the bundled ufbx C sources with /MT.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    # The Windows SDK import libraries reference PDBs that are not shipped with the
+    # cross-compilation SDK; silence the harmless LNK4099 diagnostics.
+    "-C", "link-arg=/ignore:4099",
+]
+
 [target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "target-feature=+crt-static"]

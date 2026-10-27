@@ -10,6 +10,7 @@ impl eframe::App for TextureForge {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_renderer(ctx);
         self.poll_model_load(ctx);
+        self.poll_model_preview(ctx);
         self.handle_dropped_files(ctx);
 
         // Keep the spinner in the status bar animating while a render is in progress, and the
@@ -27,17 +28,21 @@ impl eframe::App for TextureForge {
         );
         let redo_alt_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Y);
         let mut navigated = false;
-        // `consume_shortcut` matches logically and ignores extra Shift, so Ctrl+Shift+Z must be
-        // checked before Ctrl+Z or the redo shortcut would be swallowed by undo.
-        if ctx.input_mut(|i| i.consume_shortcut(&redo_shift_shortcut)) {
-            self.redo_action(ctx);
-            navigated = true;
-        } else if ctx.input_mut(|i| i.consume_shortcut(&undo_shortcut)) {
-            self.undo_action(ctx);
-            navigated = true;
-        } else if ctx.input_mut(|i| i.consume_shortcut(&redo_alt_shortcut)) {
-            self.redo_action(ctx);
-            navigated = true;
+        // The preview window owns undo/redo while the pointer is over it; it handles the
+        // shortcuts itself so the editor history is not modified at the same time.
+        if !self.model_preview.shortcuts_active(ctx) {
+            // `consume_shortcut` matches logically and ignores extra Shift, so Ctrl+Shift+Z must
+            // be checked before Ctrl+Z or the redo shortcut would be swallowed by undo.
+            if ctx.input_mut(|i| i.consume_shortcut(&redo_shift_shortcut)) {
+                self.redo_action(ctx);
+                navigated = true;
+            } else if ctx.input_mut(|i| i.consume_shortcut(&undo_shortcut)) {
+                self.undo_action(ctx);
+                navigated = true;
+            } else if ctx.input_mut(|i| i.consume_shortcut(&redo_alt_shortcut)) {
+                self.redo_action(ctx);
+                navigated = true;
+            }
         }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
